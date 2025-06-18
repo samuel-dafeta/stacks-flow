@@ -73,3 +73,89 @@
     (<= balance MAX-BALANCE)
   )
 )
+
+(define-private (validate-balance-sum (balance-a uint) (balance-b uint) (total uint))
+  ;; Validates that balances don't overflow and sum correctly
+  (and
+    (is-valid-balance balance-a)
+    (is-valid-balance balance-b)
+    ;; Check for overflow in addition
+    (>= (+ balance-a balance-b) balance-a)
+    (>= (+ balance-a balance-b) balance-b)
+    ;; Check that sum equals total
+    (is-eq (+ balance-a balance-b) total)
+  )
+)
+
+;; UTILITY FUNCTIONS
+
+(define-private (uint-to-buff (n uint))
+  ;; Converts unsigned integer to buffer for message construction
+  (unwrap-panic (to-consensus-buff? n))
+)
+
+(define-private (verify-signature
+    (message (buff 256))
+    (signature (buff 65))
+    (signer principal)
+  )
+  ;; Simplified signature verification - production should use secp256k1-verify
+  (if (is-eq tx-sender signer)
+    true
+    false
+  )
+)
+
+(define-private (construct-state-message 
+    (channel-id (buff 32))
+    (balance-a uint)
+    (balance-b uint)
+  )
+  ;; Safely constructs state message with validated inputs
+  (concat 
+    (concat channel-id (uint-to-buff balance-a))
+    (uint-to-buff balance-b)
+  )
+)
+
+;; CHANNEL MANAGEMENT FUNCTIONS
+
+(define-public (create-channel
+    (channel-id (buff 32))
+    (participant-b principal)
+    (initial-deposit uint)
+  )
+  ;; Creates a new bidirectional payment channel between two participants
+  (begin
+    ;; Input validation
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit initial-deposit) ERR-INVALID-INPUT)
+    (asserts! (is-valid-balance initial-deposit) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+    ;; Ensure channel doesn't already exist
+    (asserts!
+      (is-none (map-get? payment-channels {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: participant-b,
+      }))
+      ERR-CHANNEL-EXISTS
+    )
+    ;; Lock initial deposit in contract
+    (try! (stx-transfer? initial-deposit tx-sender (as-contract tx-sender)))
+    ;; Initialize channel state
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: participant-b,
+    } {
+      total-deposited: initial-deposit,
+      balance-a: initial-deposit,
+      balance-b: u0,
+      is-open: true,
+      dispute-deadline: u0,
+      nonce: u0,
+    })
+    (ok true)
+  )
+)
