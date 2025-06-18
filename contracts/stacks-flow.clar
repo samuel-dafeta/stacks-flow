@@ -159,3 +159,107 @@
     (ok true)
   )
 )
+
+(define-public (fund-channel
+    (channel-id (buff 32))
+    (participant-b principal)
+    (additional-funds uint)
+  )
+  ;; Adds additional STX funds to an existing open channel
+  (let ((channel (unwrap!
+      (map-get? payment-channels {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: participant-b,
+      })
+      ERR-CHANNEL-NOT-FOUND
+    )))
+    ;; Input validation
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-deposit additional-funds) ERR-INVALID-INPUT)
+    (asserts! (is-valid-balance additional-funds) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+    (asserts! (get is-open channel) ERR-CHANNEL-CLOSED)
+    ;; Check for overflow in total deposited
+    (asserts! (>= (+ (get total-deposited channel) additional-funds) 
+                  (get total-deposited channel)) ERR-BALANCE-OVERFLOW)
+    (asserts! (>= (+ (get balance-a channel) additional-funds) 
+                  (get balance-a channel)) ERR-BALANCE-OVERFLOW)
+    ;; Transfer additional funds to contract
+    (try! (stx-transfer? additional-funds tx-sender (as-contract tx-sender)))
+    ;; Update channel balances
+    (map-set payment-channels {
+      channel-id: channel-id,
+      participant-a: tx-sender,
+      participant-b: participant-b,
+    }
+      (merge channel {
+        total-deposited: (+ (get total-deposited channel) additional-funds),
+        balance-a: (+ (get balance-a channel) additional-funds),
+      })
+    )
+    (ok true)
+  )
+)
+
+;; CHANNEL CLOSURE FUNCTIONS
+
+(define-public (close-channel-cooperative
+    (channel-id (buff 32))
+    (participant-b principal)
+    (balance-a uint)
+    (balance-b uint)
+    (signature-a (buff 65))
+    (signature-b (buff 65))
+  )
+  ;; Closes channel immediately with mutual agreement and signed final state
+  (let (
+      (channel (unwrap!
+        (map-get? payment-channels {
+          channel-id: channel-id,
+          participant-a: tx-sender,
+          participant-b: participant-b,
+        })
+        ERR-CHANNEL-NOT-FOUND
+      ))
+      (total-channel-funds (get total-deposited channel))
+    )
+    ;; Input validation
+    (asserts! (is-valid-channel-id channel-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-signature signature-a) ERR-INVALID-INPUT)
+    (asserts! (is-valid-signature signature-b) ERR-INVALID-INPUT)
+    (asserts! (not (is-eq tx-sender participant-b)) ERR-INVALID-INPUT)
+    (asserts! (get is-open channel) ERR-CHANNEL-CLOSED)
+    ;; Validate balances before using them
+    (asserts! (validate-balance-sum balance-a balance-b total-channel-funds) 
+              ERR-INSUFFICIENT-FUNDS)
+    ;; Construct message with validated inputs
+    (let ((message (construct-state-message channel-id balance-a balance-b)))
+      ;; Verify both parties signed the final state
+      (asserts!
+        (and
+          (verify-signature message signature-a tx-sender)
+          (verify-signature message signature-b participant-b)
+        )
+        ERR-INVALID-SIGNATURE
+      )
+      ;; Distribute final balances
+      (try! (as-contract (stx-transfer? balance-a tx-sender tx-sender)))
+      (try! (as-contract (stx-transfer? balance-b tx-sender participant-b)))
+      ;; Mark channel as closed
+      (map-set payment-channels {
+        channel-id: channel-id,
+        participant-a: tx-sender,
+        participant-b: participant-b,
+      }
+        (merge channel {
+          is-open: false,
+          balance-a: u0,
+          balance-b: u0,
+          total-deposited: u0,
+        })
+      )
+      (ok true)
+    )
+  )
+)
